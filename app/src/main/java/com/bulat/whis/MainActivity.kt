@@ -223,7 +223,7 @@ class MainActivity : AppCompatActivity() {
             transcriptionProgress.progress = 0
             segments = emptyList()
             resultText.text = ""
-            statusText.text = "Загружаю модель в память…"
+            statusText.text = "Загружаю ${model.title} в память…"
 
             var engineToClose: WhisperEngine? = null
             try {
@@ -311,7 +311,11 @@ class MainActivity : AppCompatActivity() {
             modelStatus.text = "На телефоне · ${humanBytes(file.length())}"
             downloadModelButton.text = "Модель уже есть"
         } else {
-            modelStatus.text = "Можно скачать или выбрать уже имеющийся .bin файл."
+            modelStatus.text = when (model) {
+                WhisperModel.MEDIUM_Q5_0 -> "Рекомендуется для телефона: меньше памяти и заметно быстрее Full."
+                WhisperModel.MEDIUM_FULL -> "Полный Medium точнее, но на телефоне очень тяжёлый."
+                else -> "Можно скачать или выбрать уже имеющийся .bin файл."
+            }
             downloadModelButton.text = "Скачать модель"
         }
     }
@@ -319,15 +323,17 @@ class MainActivity : AppCompatActivity() {
     private fun inferModelFromName(name: String): WhisperModel {
         val lower = name.lowercase(Locale.US)
         return when {
-            "large-v3-turbo" in lower || "large_v3_turbo" in lower -> WhisperModel.LARGE_V3_TURBO_Q5_0
-            "medium" in lower -> WhisperModel.MEDIUM_Q5_0
+            "large-v3-turbo-q5_0" in lower || "large_v3_turbo_q5_0" in lower -> WhisperModel.LARGE_V3_TURBO_Q5_0
+            "medium-q5_0" in lower || "medium_q5_0" in lower -> WhisperModel.MEDIUM_Q5_0
+            "medium" in lower -> WhisperModel.MEDIUM_FULL
+            "small-q5_1" in lower || "small_q5_1" in lower -> WhisperModel.SMALL_Q5_1
             "small" in lower -> WhisperModel.SMALL_Q5_1
             else -> selectedModel()
         }
     }
 
     private fun selectedModel(): WhisperModel {
-        return (modelSpinner.selectedItem as? WhisperModel) ?: WhisperModel.SMALL_Q5_1
+        return (modelSpinner.selectedItem as? WhisperModel) ?: WhisperModel.MEDIUM_Q5_0
     }
 
     private fun selectedLanguage(): LanguageOption {
