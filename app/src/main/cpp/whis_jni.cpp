@@ -8,6 +8,44 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+struct ProgressCallbackData {
+    JavaVM *jvm = nullptr;
+    jobject callback = nullptr;
+    jmethodID method = nullptr;
+};
+
+static void whisper_progress_bridge(
+        whisper_context *,
+        whisper_state *,
+        int progress,
+        void *user_data) {
+    auto *data = static_cast<ProgressCallbackData *>(user_data);
+    if (data == nullptr || data->jvm == nullptr || data->callback == nullptr || data->method == nullptr) {
+        return;
+    }
+
+    JNIEnv *env = nullptr;
+    bool detach = false;
+    const jint state = data->jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (state == JNI_EDETACHED) {
+        if (data->jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            return;
+        }
+        detach = true;
+    } else if (state != JNI_OK || env == nullptr) {
+        return;
+    }
+
+    env->CallVoidMethod(data->callback, data->method, static_cast<jint>(progress));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    if (detach) {
+        data->jvm->DetachCurrentThread();
+    }
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_bulat_whis_NativeWhisper_initContext(
         JNIEnv *env,
@@ -45,7 +83,8 @@ Java_com_bulat_whis_NativeWhisper_fullTranscribe(
         jint num_threads,
         jfloatArray audio_data,
         jstring language,
-        jboolean translate) {
+        jboolean translate,
+        jobject progress_callback) {
     auto *ctx = reinterpret_cast<whisper_context *>(context_ptr);
     if (ctx == nullptr) {
         return -1;
@@ -68,9 +107,28 @@ Java_com_bulat_whis_NativeWhisper_fullTranscribe(
     params.single_segment = false;
     params.suppress_blank = true;
 
+    ProgressCallbackData callback_data;
+    if (progress_callback != nullptr) {
+        env->GetJavaVM(&callback_data.jvm);
+        callback_data.callback = env->NewGlobalRef(progress_callback);
+        jclass callback_class = env->GetObjectClass(progress_callback);
+        callback_data.method = env->GetMethodID(callback_class, "onProgress", "(I)V");
+        env->DeleteLocalRef(callback_class);
+
+        if (callback_data.method != nullptr) {
+            params.progress_callback = whisper_progress_bridge;
+            params.progress_callback_user_data = &callback_data;
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
     whisper_reset_timings(ctx);
     const int result = whisper_full(ctx, params, samples, static_cast<int>(sample_count));
 
+    if (callback_data.callback != nullptr) {
+        env->DeleteGlobalRef(callback_data.callback);
+    }
     env->ReleaseStringUTFChars(language, language_chars);
     env->ReleaseFloatArrayElements(audio_data, samples, JNI_ABORT);
 
