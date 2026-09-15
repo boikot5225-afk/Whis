@@ -26,6 +26,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modelSpinner: Spinner
     private lateinit var languageSpinner: Spinner
     private lateinit var downloadModelButton: Button
+    private lateinit var importModelButton: Button
     private lateinit var modelDownloadProgress: ProgressBar
     private lateinit var modelStatus: TextView
     private lateinit var pickAudioButton: Button
@@ -67,6 +68,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val openModel = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val displayName = queryDisplayName(uri) ?: "model.bin"
+            val model = inferModelFromName(displayName)
+            val modelIndex = WhisperModel.values().indexOf(model)
+            if (modelIndex >= 0) modelSpinner.setSelection(modelIndex)
+
+            lifecycleScope.launch {
+                setWorking(true)
+                statusText.text = "Импортирую $displayName…"
+                try {
+                    val file = modelManager.importModel(uri, model)
+                    statusText.text = "Модель импортирована: ${humanBytes(file.length())}. Скачивать заново не нужно."
+                } catch (t: Throwable) {
+                    statusText.text = "Не удалось импортировать модель: ${t.message ?: t.javaClass.simpleName}"
+                } finally {
+                    setWorking(false)
+                    updateModelUi()
+                }
+            }
+        }
+    }
+
     private val saveTxt = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         writeExport(uri)
     }
@@ -91,6 +115,7 @@ class MainActivity : AppCompatActivity() {
         modelSpinner = findViewById(R.id.modelSpinner)
         languageSpinner = findViewById(R.id.languageSpinner)
         downloadModelButton = findViewById(R.id.downloadModelButton)
+        importModelButton = findViewById(R.id.importModelButton)
         modelDownloadProgress = findViewById(R.id.modelDownloadProgress)
         modelStatus = findViewById(R.id.modelStatus)
         pickAudioButton = findViewById(R.id.pickAudioButton)
@@ -132,6 +157,10 @@ class MainActivity : AppCompatActivity() {
 
         downloadModelButton.setOnClickListener {
             downloadSelectedModel()
+        }
+
+        importModelButton.setOnClickListener {
+            openModel.launch(arrayOf("application/octet-stream", "*/*"))
         }
 
         transcribeButton.setOnClickListener {
@@ -183,7 +212,7 @@ class MainActivity : AppCompatActivity() {
         val model = selectedModel()
         val modelFile = modelManager.fileFor(model)
         if (!modelManager.isDownloaded(model)) {
-            statusText.text = "Сначала скачай выбранную модель."
+            statusText.text = "Выбери или импортируй модель."
             return
         }
 
@@ -240,12 +269,14 @@ class MainActivity : AppCompatActivity() {
         modelSpinner.isEnabled = !working
         languageSpinner.isEnabled = !working
         pickAudioButton.isEnabled = !working
+        importModelButton.isEnabled = !working
         updateControls()
     }
 
     private fun updateControls() {
         val modelReady = modelManager.isDownloaded(selectedModel())
         downloadModelButton.isEnabled = !isWorking && !modelReady
+        importModelButton.isEnabled = !isWorking
         transcribeButton.isEnabled = !isWorking && modelReady && audioUri != null
         exportTxtButton.isEnabled = !isWorking && segments.isNotEmpty()
         exportSrtButton.isEnabled = !isWorking && segments.isNotEmpty()
@@ -256,10 +287,20 @@ class MainActivity : AppCompatActivity() {
         val file = modelManager.fileFor(model)
         if (modelManager.isDownloaded(model)) {
             modelStatus.text = "На телефоне · ${humanBytes(file.length())}"
-            downloadModelButton.text = "Модель скачана"
+            downloadModelButton.text = "Модель уже есть"
         } else {
-            modelStatus.text = "Нужно скачать один раз. Потом интернет не нужен."
+            modelStatus.text = "Можно скачать или выбрать уже имеющийся .bin файл."
             downloadModelButton.text = "Скачать модель"
+        }
+    }
+
+    private fun inferModelFromName(name: String): WhisperModel {
+        val lower = name.lowercase(Locale.US)
+        return when {
+            "large-v3-turbo" in lower || "large_v3_turbo" in lower -> WhisperModel.LARGE_V3_TURBO_Q5_0
+            "medium" in lower -> WhisperModel.MEDIUM_Q5_0
+            "small" in lower -> WhisperModel.SMALL_Q5_1
+            else -> selectedModel()
         }
     }
 
