@@ -38,15 +38,17 @@ class ModelManager(private val context: Context) {
     private fun isPlausibleModel(file: File, model: WhisperModel): Boolean {
         if (!file.isFile || file.length() < model.minExpectedBytes) return false
 
-        // whisper.cpp GGML models start with the ASCII bytes "ggml" (little-endian magic).
+        // GGML_FILE_MAGIC is 0x67676d6c. whisper.cpp reads it as a little-endian
+        // uint32_t, so on disk the first four bytes are 6c 6d 67 67 ("lmgg"),
+        // not the human-readable ASCII string "ggml".
         return runCatching {
             FileInputStream(file).use { input ->
                 val header = ByteArray(4)
                 input.read(header) == 4 &&
-                    header[0] == 'g'.code.toByte() &&
-                    header[1] == 'g'.code.toByte() &&
-                    header[2] == 'm'.code.toByte() &&
-                    header[3] == 'l'.code.toByte()
+                    header[0] == 0x6c.toByte() &&
+                    header[1] == 0x6d.toByte() &&
+                    header[2] == 0x67.toByte() &&
+                    header[3] == 0x67.toByte()
             }
         }.getOrDefault(false)
     }
@@ -64,7 +66,7 @@ class ModelManager(private val context: Context) {
             } ?: error("Не удалось открыть выбранный файл модели")
 
             check(isPlausibleModel(partial, model)) {
-                "Это не полноценная ${model.title} модель: файл ${partial.length() / (1024 * 1024)} МБ. Выбери настоящий ggml-*.bin."
+                "Файл не похож на совместимую GGML-модель Whisper: ${partial.length() / (1024 * 1024)} МБ."
             }
             if (target.exists()) target.delete()
             check(partial.renameTo(target)) { "Не удалось сохранить импортированную модель" }
