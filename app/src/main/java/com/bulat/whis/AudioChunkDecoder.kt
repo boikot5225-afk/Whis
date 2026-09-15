@@ -15,13 +15,16 @@ import java.nio.ByteOrder
 
 object AudioChunkDecoder {
     const val TARGET_SAMPLE_RATE = 16_000
-    private const val CHUNK_SECONDS = 300
+    // Keep chunks reasonably short so the UI gets a progress update often enough.
+    // Five-minute chunks made the app look frozen while whisper.cpp was still working.
+    private const val CHUNK_SECONDS = 60
     private const val TIMEOUT_US = 10_000L
 
     /**
      * Decodes Android-supported audio (MP3/M4A/AAC/OGG/FLAC/WAV depending on device),
      * downmixes it to mono and resamples to Whisper's 16 kHz input. Audio is delivered
-     * in five-minute chunks so an hour-long podcast does not need one giant FloatArray.
+     * in one-minute chunks so long podcasts do not need one giant FloatArray and the UI
+     * can report progress after each chunk.
      */
     suspend fun decode(
         context: Context,
