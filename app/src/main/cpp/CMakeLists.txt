@@ -4,6 +4,17 @@ project(whis LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# The APK is intentionally built with the Android "debug" variant so it can be
+# installed over our test builds without introducing a second signing setup.
+# However, CMake would normally compile every native dependency (including ggml)
+# with Debug flags. That is disastrous for Whisper because virtually all of the
+# expensive matrix kernels live in ggml, not in our JNI wrapper. Keep symbols for
+# debugging, but force optimized native code for performance testing.
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_C_FLAGS_DEBUG "-O3 -g -DNDEBUG")
+    set(CMAKE_CXX_FLAGS_DEBUG "-O3 -g -DNDEBUG")
+endif()
+
 get_filename_component(
     WHISPER_ROOT
     "${CMAKE_CURRENT_LIST_DIR}/../../../../vendor/whisper.cpp"
@@ -22,12 +33,12 @@ else()
     set(WHISPER_VERSION_STRING "unknown")
 endif()
 message(STATUS "Whis: whisper.cpp version ${WHISPER_VERSION_STRING}")
+message(STATUS "Whis: native build type ${CMAKE_BUILD_TYPE}; C flags ${CMAKE_C_FLAGS_DEBUG}")
 
 find_library(LOG_LIB log)
 
 # Android is cross-compiled, so never use host-native flags. Tell ggml explicitly
-# which ARM features we target. Snapdragon 8 Gen 3 supports FP16 + dot-product,
-# which are important for quantized Whisper CPU inference.
+# which ARM features we target. Snapdragon 8 Gen 3 supports FP16 + dot-product.
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 if (${ANDROID_ABI} STREQUAL "arm64-v8a")
     set(GGML_CPU_ARM_ARCH "armv8.2-a+fp16+dotprod" CACHE STRING "" FORCE)
