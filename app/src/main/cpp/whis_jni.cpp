@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include <algorithm>
+#include <cstdio>
 #include <string>
 #include "whisper.h"
 
@@ -188,4 +189,57 @@ Java_com_bulat_whis_NativeWhisper_getSystemInfo(
         JNIEnv *env,
         jclass) {
     return env->NewStringUTF(whisper_print_system_info());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_bulat_whis_NativeWhisper_getTimings(
+        JNIEnv *env,
+        jclass,
+        jlong context_ptr) {
+    auto *ctx = reinterpret_cast<whisper_context *>(context_ptr);
+    if (ctx == nullptr) {
+        return env->NewStringUTF("timings unavailable");
+    }
+
+    const whisper_timings *t = whisper_get_timings(ctx);
+    if (t == nullptr) {
+        return env->NewStringUTF("timings unavailable");
+    }
+
+    char buffer[256];
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "sample %.0f ms · encode %.0f ms · decode %.0f ms · batch %.0f ms · prompt %.0f ms",
+        t->sample_ms,
+        t->encode_ms,
+        t->decode_ms,
+        t->batchd_ms,
+        t->prompt_ms
+    );
+    return env->NewStringUTF(buffer);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_bulat_whis_NativeWhisper_getModelInfo(
+        JNIEnv *env,
+        jclass,
+        jlong context_ptr) {
+    auto *ctx = reinterpret_cast<whisper_context *>(context_ptr);
+    if (ctx == nullptr) {
+        return env->NewStringUTF("model unavailable");
+    }
+
+    const char *readable = whisper_model_type_readable(ctx);
+    char buffer[256];
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "model %s · ftype %d · audio layers %d · text layers %d",
+        readable != nullptr ? readable : "unknown",
+        whisper_model_ftype(ctx),
+        whisper_model_n_audio_layer(ctx),
+        whisper_model_n_text_layer(ctx)
+    );
+    return env->NewStringUTF(buffer);
 }
