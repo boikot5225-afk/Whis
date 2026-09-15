@@ -232,22 +232,44 @@ class MainActivity : AppCompatActivity() {
                 val collected = mutableListOf<WhisperSegment>()
 
                 AudioChunkDecoder.decode(this@MainActivity, uri) { samples, offsetMs, totalDurationMs ->
+                    val chunkDurationMs = samples.size * 1_000L / AudioChunkDecoder.TARGET_SAMPLE_RATE
+                    var lastOverallProgress = -1
+
                     withContext(Dispatchers.Main) {
                         statusText.text = "Распознаю с ${formatClock(offsetMs)}…"
                     }
 
-                    val chunkSegments = engine.transcribe(samples, language, offsetMs)
+                    val chunkSegments = engine.transcribe(samples, language, offsetMs) { chunkProgress ->
+                        if (totalDurationMs > 0) {
+                            val processedMs = offsetMs + (chunkDurationMs * chunkProgress / 100L)
+                            val overallProgress = ((processedMs * 100L) / totalDurationMs)
+                                .toInt()
+                                .coerceIn(0, 99)
+
+                            if (overallProgress != lastOverallProgress) {
+                                lastOverallProgress = overallProgress
+                                runOnUiThread {
+                                    transcriptionProgress.progress = overallProgress
+                                    statusText.text = "Распознаю ${formatClock(processedMs)} / ${formatClock(totalDurationMs)} · $overallProgress%"
+                                }
+                            }
+                        } else {
+                            runOnUiThread {
+                                statusText.text = "Распознаю текущий фрагмент · $chunkProgress%"
+                            }
+                        }
+                    }
                     collected += chunkSegments
 
                     withContext(Dispatchers.Main) {
                         segments = collected.toList()
                         resultText.text = segments.joinToString("\n\n") { it.text }
 
-                        val processedMs = offsetMs + samples.size * 1_000L / AudioChunkDecoder.TARGET_SAMPLE_RATE
+                        val processedMs = offsetMs + chunkDurationMs
                         transcriptionProgress.progress = if (totalDurationMs > 0) {
                             ((processedMs * 100L) / totalDurationMs).toInt().coerceIn(0, 99)
                         } else {
-                            0
+                            transcriptionProgress.progress
                         }
                     }
                 }
