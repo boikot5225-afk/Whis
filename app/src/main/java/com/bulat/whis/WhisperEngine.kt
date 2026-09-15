@@ -15,6 +15,11 @@ data class WhisperSegment(
 class WhisperEngine(modelFile: File) : Closeable {
     private var contextPtr: Long = NativeWhisper.initContext(modelFile.absolutePath)
 
+    val threadCount: Int = run {
+        val cores = Runtime.getRuntime().availableProcessors()
+        (cores - 2).coerceIn(2, 8)
+    }
+
     init {
         check(contextPtr != 0L) { "Не удалось загрузить модель ${modelFile.name}" }
     }
@@ -27,14 +32,12 @@ class WhisperEngine(modelFile: File) : Closeable {
     ): List<WhisperSegment> = withContext(Dispatchers.Default) {
         check(contextPtr != 0L) { "Whisper уже закрыт" }
 
-        val cores = Runtime.getRuntime().availableProcessors()
-        val threads = (cores - 2).coerceIn(2, 8)
         val callback = NativeWhisper.ProgressCallback { progress ->
             onProgress(progress.coerceIn(0, 100))
         }
         val rc = NativeWhisper.fullTranscribe(
             contextPtr,
-            threads,
+            threadCount,
             samples,
             language,
             false,
@@ -55,6 +58,18 @@ class WhisperEngine(modelFile: File) : Closeable {
             }
         }
     }
+
+    fun timingInfo(): String {
+        check(contextPtr != 0L) { "Whisper уже закрыт" }
+        return NativeWhisper.getTimings(contextPtr)
+    }
+
+    fun modelInfo(): String {
+        check(contextPtr != 0L) { "Whisper уже закрыт" }
+        return NativeWhisper.getModelInfo(contextPtr)
+    }
+
+    fun systemInfo(): String = NativeWhisper.getSystemInfo()
 
     override fun close() {
         if (contextPtr != 0L) {
