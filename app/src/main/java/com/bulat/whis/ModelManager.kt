@@ -13,10 +13,32 @@ enum class WhisperModel(
     val id: String,
     val title: String,
     val minExpectedBytes: Long,
+    val maxExpectedBytes: Long? = null,
 ) {
-    SMALL_Q5_1("small-q5_1", "Small — быстро", 100L * 1024 * 1024),
-    MEDIUM_Q5_0("medium-q5_0", "Medium — точнее", 300L * 1024 * 1024),
-    LARGE_V3_TURBO_Q5_0("large-v3-turbo-q5_0", "Large v3 Turbo — максимум", 500L * 1024 * 1024),
+    MEDIUM_Q5_0(
+        "medium-q5_0",
+        "Medium Q5 — рекомендовано",
+        300L * 1024 * 1024,
+        900L * 1024 * 1024,
+    ),
+    SMALL_Q5_1(
+        "small-q5_1",
+        "Small Q5 — быстро",
+        100L * 1024 * 1024,
+        500L * 1024 * 1024,
+    ),
+    MEDIUM_FULL(
+        "medium",
+        "Medium Full — медленно",
+        1_000L * 1024 * 1024,
+        2_000L * 1024 * 1024,
+    ),
+    LARGE_V3_TURBO_Q5_0(
+        "large-v3-turbo-q5_0",
+        "Large v3 Turbo Q5",
+        500L * 1024 * 1024,
+        1_500L * 1024 * 1024,
+    ),
     ;
 
     val fileName: String
@@ -31,16 +53,35 @@ enum class WhisperModel(
 class ModelManager(private val context: Context) {
     private val modelsDir = File(context.filesDir, "models").apply { mkdirs() }
 
+    init {
+        migrateLegacyFullMedium()
+    }
+
     fun fileFor(model: WhisperModel): File = File(modelsDir, model.fileName)
 
     fun isDownloaded(model: WhisperModel): Boolean = isPlausibleModel(fileFor(model), model)
 
+    private fun migrateLegacyFullMedium() {
+        // Older Whis builds stored any file containing "medium" under the Q5 filename.
+        // If that file is actually the ~1.5 GB full Medium model, keep it but move it
+        // to its correct name so it is not mistaken for the much smaller Q5 model.
+        val oldMisnamed = File(modelsDir, "ggml-medium-q5_0.bin")
+        val fullTarget = File(modelsDir, "ggml-medium.bin")
+        val oneGiB = 1_000L * 1024 * 1024
+
+        if (oldMisnamed.isFile && oldMisnamed.length() >= oneGiB && !fullTarget.exists()) {
+            runCatching { oldMisnamed.renameTo(fullTarget) }
+        }
+    }
+
     private fun isPlausibleModel(file: File, model: WhisperModel): Boolean {
         if (!file.isFile || file.length() < model.minExpectedBytes) return false
+        model.maxExpectedBytes?.let { max ->
+            if (file.length() > max) return false
+        }
 
         // GGML_FILE_MAGIC is 0x67676d6c. whisper.cpp reads it as a little-endian
-        // uint32_t, so on disk the first four bytes are 6c 6d 67 67 ("lmgg"),
-        // not the human-readable ASCII string "ggml".
+        // uint32_t, so on disk the first four bytes are 6c 6d 67 67 ("lmgg").
         return runCatching {
             FileInputStream(file).use { input ->
                 val header = ByteArray(4)
@@ -66,7 +107,7 @@ class ModelManager(private val context: Context) {
             } ?: error("Не удалось открыть выбранный файл модели")
 
             check(isPlausibleModel(partial, model)) {
-                "Файл не похож на совместимую GGML-модель Whisper: ${partial.length() / (1024 * 1024)} МБ."
+                "Файл не похож на ${model.title}: ${partial.length() / (1024 * 1024)} МБ."
             }
             if (target.exists()) target.delete()
             check(partial.renameTo(target)) { "Не удалось сохранить импортированную модель" }
@@ -91,7 +132,7 @@ class ModelManager(private val context: Context) {
             connectTimeout = 20_000
             readTimeout = 60_000
             instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "Whis/0.1 Android")
+            setRequestProperty("User-Agent", "Whis/0.2 Android")
         }
 
         try {
@@ -124,7 +165,9 @@ class ModelManager(private val context: Context) {
                 }
             }
 
-            check(isPlausibleModel(partial, model)) { "Скачанный файл модели повреждён или неполный" }
+            check(isPlausibleModel(partial, model)) {
+                "Скачанный файл модели повреждён, неполный или не соответствует выбранному варианту"
+            }
             if (target.exists()) target.delete()
             check(partial.renameTo(target)) { "Не удалось сохранить модель" }
             withContext(Dispatchers.Main) { onProgress(100) }
