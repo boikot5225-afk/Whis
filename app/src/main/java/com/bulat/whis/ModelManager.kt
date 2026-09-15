@@ -5,16 +5,18 @@ import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
 enum class WhisperModel(
     val id: String,
     val title: String,
+    val minExpectedBytes: Long,
 ) {
-    SMALL_Q5_1("small-q5_1", "Small — быстро"),
-    MEDIUM_Q5_0("medium-q5_0", "Medium — точнее"),
-    LARGE_V3_TURBO_Q5_0("large-v3-turbo-q5_0", "Large v3 Turbo — максимум"),
+    SMALL_Q5_1("small-q5_1", "Small — быстро", 100L * 1024 * 1024),
+    MEDIUM_Q5_0("medium-q5_0", "Medium — точнее", 300L * 1024 * 1024),
+    LARGE_V3_TURBO_Q5_0("large-v3-turbo-q5_0", "Large v3 Turbo — максимум", 500L * 1024 * 1024),
     ;
 
     val fileName: String
@@ -31,9 +33,22 @@ class ModelManager(private val context: Context) {
 
     fun fileFor(model: WhisperModel): File = File(modelsDir, model.fileName)
 
-    fun isDownloaded(model: WhisperModel): Boolean {
-        val file = fileFor(model)
-        return file.isFile && file.length() > 1_000_000L
+    fun isDownloaded(model: WhisperModel): Boolean = isPlausibleModel(fileFor(model), model)
+
+    private fun isPlausibleModel(file: File, model: WhisperModel): Boolean {
+        if (!file.isFile || file.length() < model.minExpectedBytes) return false
+
+        // whisper.cpp GGML models start with the ASCII bytes "ggml" (little-endian magic).
+        return runCatching {
+            FileInputStream(file).use { input ->
+                val header = ByteArray(4)
+                input.read(header) == 4 &&
+                    header[0] == 'g'.code.toByte() &&
+                    header[1] == 'g'.code.toByte() &&
+                    header[2] == 'm'.code.toByte() &&
+                    header[3] == 'l'.code.toByte()
+            }
+        }.getOrDefault(false)
     }
 
     suspend fun importModel(uri: Uri, model: WhisperModel): File = withContext(Dispatchers.IO) {
@@ -48,7 +63,9 @@ class ModelManager(private val context: Context) {
                 }
             } ?: error("Не удалось открыть выбранный файл модели")
 
-            check(partial.length() > 1_000_000L) { "Файл модели подозрительно маленький" }
+            check(isPlausibleModel(partial, model)) {
+                "Это не полноценная ${model.title} модель: файл ${partial.length() / (1024 * 1024)} МБ. Выбери настоящий ggml-*.bin."
+            }
             if (target.exists()) target.delete()
             check(partial.renameTo(target)) { "Не удалось сохранить импортированную модель" }
             target
@@ -105,7 +122,7 @@ class ModelManager(private val context: Context) {
                 }
             }
 
-            check(partial.length() > 1_000_000L) { "Скачанный файл модели подозрительно маленький" }
+            check(isPlausibleModel(partial, model)) { "Скачанный файл модели повреждён или неполный" }
             if (target.exists()) target.delete()
             check(partial.renameTo(target)) { "Не удалось сохранить модель" }
             withContext(Dispatchers.Main) { onProgress(100) }
