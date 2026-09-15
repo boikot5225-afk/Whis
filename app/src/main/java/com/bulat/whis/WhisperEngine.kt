@@ -23,17 +23,22 @@ class WhisperEngine(modelFile: File) : Closeable {
         samples: FloatArray,
         language: String,
         offsetMs: Long = 0L,
+        onProgress: (Int) -> Unit = {},
     ): List<WhisperSegment> = withContext(Dispatchers.Default) {
         check(contextPtr != 0L) { "Whisper уже закрыт" }
 
         val cores = Runtime.getRuntime().availableProcessors()
         val threads = (cores - 2).coerceIn(2, 8)
+        val callback = NativeWhisper.ProgressCallback { progress ->
+            onProgress(progress.coerceIn(0, 100))
+        }
         val rc = NativeWhisper.fullTranscribe(
             contextPtr,
             threads,
             samples,
             language,
             false,
+            callback,
         )
         check(rc == 0) { "Whisper завершился с кодом $rc" }
 
