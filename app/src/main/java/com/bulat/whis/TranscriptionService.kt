@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.CancellationException
@@ -49,6 +50,7 @@ class TranscriptionService : Service() {
     private var transcriptionJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastNotifiedProgress = -1
+    private var diagnosticSuffix = ""
 
     override fun onCreate() {
         super.onCreate()
@@ -80,6 +82,7 @@ class TranscriptionService : Service() {
             return START_NOT_STICKY
         }
 
+        diagnosticSuffix = ""
         TranscriptionStore.set(
             TranscriptionUiState(
                 running = true,
@@ -107,7 +110,7 @@ class TranscriptionService : Service() {
     ) {
         val modelManager = ModelManager(this)
         val modelFile = modelManager.fileFor(model)
-        var engine: WhisperEngine? = null
+        var engineToClose: WhisperEngine? = null
 
         try {
             check(modelManager.isDownloaded(model)) { "Модель ${model.title} не найдена" }
@@ -119,7 +122,20 @@ class TranscriptionService : Service() {
                 segments = emptyList(),
             )
 
-            engine = WhisperEngine(modelFile)
+            val modelLoadStarted = SystemClock.elapsedRealtime()
+            val engine = WhisperEngine(modelFile)
+            engineToClose = engine
+            val modelLoadMs = SystemClock.elapsedRealtime() - modelLoadStarted
+            val systemInfo = engine.systemInfo().trim().replace(" | ", " · ")
+            val modelInfo = engine.modelInfo()
+            diagnosticSuffix = buildString {
+                append("\nДиаг: ")
+                append(engine.threadCount).append(" потоков · модель загрузилась за ")
+                append(formatElapsed(modelLoadMs))
+                append('\n').append(modelInfo)
+                append('\n').append(systemInfo)
+            }
+
             val collected = mutableListOf<WhisperSegment>()
 
             AudioChunkDecoder.decode(this, audioUri) { samples, offsetMs, totalDurationMs ->
@@ -128,11 +144,12 @@ class TranscriptionService : Service() {
 
                 updateState(
                     progress = currentOverall(offsetMs, totalDurationMs),
-                    status = "Распознаю с ${formatClock(offsetMs)}…",
+                    status = "Распознаю с ${formatClock(offsetMs)}…$diagnosticSuffix",
                     audioName = audioName,
                     segments = collected.toList(),
                 )
 
+                val chunkWallStarted = SystemClock.elapsedRealtime()
                 val chunkSegments = engine.transcribe(samples, language, offsetMs) { chunkProgress ->
                     if (totalDurationMs > 0) {
                         val processedMs = offsetMs + (chunkDurationMs * chunkProgress / 100L)
@@ -141,7 +158,7 @@ class TranscriptionService : Service() {
                             lastOverallProgress = overall
                             updateStateFromAnyThread(
                                 progress = overall,
-                                status = "Распознаю ${formatClock(processedMs)} / ${formatClock(totalDurationMs)} · $overall%",
+                                status = "Распознаю ${formatClock(processedMs)} / ${formatClock(totalDurationMs)} · $overall%$diagnosticSuffix",
                                 audioName = audioName,
                                 segments = collected.toList(),
                             )
@@ -149,22 +166,41 @@ class TranscriptionService : Service() {
                     } else {
                         updateStateFromAnyThread(
                             progress = TranscriptionStore.state.value.progress,
-                            status = "Распознаю текущий фрагмент · $chunkProgress%",
+                            status = "Распознаю текущий фрагмент · $chunkProgress%$diagnosticSuffix",
                             audioName = audioName,
                             segments = collected.toList(),
                         )
                     }
                 }
-
+                val chunkWallMs = SystemClock.elapsedRealtime() - chunkWallStarted
                 collected += chunkSegments
+
+                val realTimeFactor = if (chunkDurationMs > 0L) {
+                    chunkWallMs.toDouble() / chunkDurationMs.toDouble()
+                } else {
+                    0.0
+                }
+                val timingInfo = engine.timingInfo()
+                diagnosticSuffix = buildString {
+                    append("\nДиаг: ")
+                    append(formatClock(chunkDurationMs)).append(" аудио → ")
+                    append(formatElapsed(chunkWallMs))
+                    append(" · ×").append(String.format(Locale.US, "%.1f", realTimeFactor))
+                    append(" · ").append(engine.threadCount).append(" потоков")
+                    append(" · load ").append(formatElapsed(modelLoadMs))
+                    append('\n').append(timingInfo)
+                    append('\n').append(modelInfo)
+                    append('\n').append(systemInfo)
+                }
+
                 val processedMs = offsetMs + chunkDurationMs
                 val overall = currentOverall(processedMs, totalDurationMs)
                 updateState(
                     progress = overall,
                     status = if (totalDurationMs > 0) {
-                        "Распознано ${formatClock(processedMs)} / ${formatClock(totalDurationMs)} · $overall%"
+                        "Распознано ${formatClock(processedMs)} / ${formatClock(totalDurationMs)} · $overall%$diagnosticSuffix"
                     } else {
-                        "Распознано ${formatClock(processedMs)}"
+                        "Распознано ${formatClock(processedMs)}$diagnosticSuffix"
                     },
                     audioName = audioName,
                     segments = collected.toList(),
@@ -176,7 +212,7 @@ class TranscriptionService : Service() {
                 TranscriptionUiState(
                     running = false,
                     progress = 100,
-                    status = "Готово. ${finalSegments.size} фрагментов.",
+                    status = "Готово. ${finalSegments.size} фрагментов.$diagnosticSuffix",
                     audioName = audioName,
                     segments = finalSegments,
                     finished = true,
@@ -188,7 +224,7 @@ class TranscriptionService : Service() {
             TranscriptionStore.set(
                 snapshot.copy(
                     running = false,
-                    status = "Распознавание остановлено.",
+                    status = "Распознавание остановлено.$diagnosticSuffix",
                     finished = false,
                 )
             )
@@ -198,14 +234,14 @@ class TranscriptionService : Service() {
             TranscriptionStore.set(
                 snapshot.copy(
                     running = false,
-                    status = "Ошибка распознавания: $message",
+                    status = "Ошибка распознавания: $message$diagnosticSuffix",
                     error = message,
                     finished = false,
                 )
             )
             showErrorNotification(audioName, message)
         } finally {
-            withContext(Dispatchers.Default) { engine?.close() }
+            withContext(Dispatchers.Default) { engineToClose?.close() }
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -311,7 +347,7 @@ class TranscriptionService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Whis · $audioName")
-            .setContentText(text)
+            .setContentText(text.substringBefore('\n'))
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(openPendingIntent)
             .setOnlyAlertOnce(true)
@@ -369,4 +405,13 @@ private fun formatClock(ms: Long): String {
     val minutes = safe / 60_000L
     val seconds = (safe / 1_000L) % 60L
     return String.format(Locale.US, "%d:%02d", minutes, seconds)
+}
+
+private fun formatElapsed(ms: Long): String {
+    val safe = ms.coerceAtLeast(0L)
+    return if (safe < 60_000L) {
+        String.format(Locale.US, "%.1f с", safe / 1000.0)
+    } else {
+        formatClock(safe)
+    }
 }
