@@ -1,11 +1,13 @@
 package com.bulat.whis
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.View
-import android.view.WindowManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -14,7 +16,10 @@ import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -41,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private var audioUri: Uri? = null
     private var audioDisplayName: String = "podcast"
     private var isWorking = false
+    private var isTranscribing = false
     private var segments: List<WhisperSegment> = emptyList()
     private var pendingExport: String = ""
 
@@ -99,6 +105,8 @@ class MainActivity : AppCompatActivity() {
         writeExport(uri)
     }
 
+    private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -107,6 +115,8 @@ class MainActivity : AppCompatActivity() {
         bindViews()
         setupSpinners()
         setupActions()
+        observeBackgroundTranscription()
+        requestNotificationPermissionIfNeeded()
         updateModelUi()
         updateControls()
     }
@@ -164,7 +174,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         transcribeButton.setOnClickListener {
-            transcribeSelectedAudio()
+            startBackgroundTranscription()
         }
 
         exportTxtButton.setOnClickListener {
@@ -175,6 +185,42 @@ class MainActivity : AppCompatActivity() {
         exportSrtButton.setOnClickListener {
             pendingExport = buildSrt(segments)
             saveSrt.launch(baseExportName() + ".srt")
+        }
+    }
+
+    private fun observeBackgroundTranscription() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                TranscriptionStore.state.collect { state ->
+                    isTranscribing = state.running
+                    transcriptionProgress.progress = state.progress
+
+                    if (state.audioName.isNotBlank()) {
+                        audioDisplayName = state.audioName
+                        audioName.text = state.audioName
+                    }
+                    if (state.status.isNotBlank()) {
+                        statusText.text = state.status
+                    }
+
+                    segments = state.segments
+                    if (segments.isNotEmpty()) {
+                        resultText.text = segments.joinToString("\n\n") { it.text }
+                    } else if (state.running) {
+                        resultText.text = ""
+                    }
+
+                    updateControls()
+                }
+            }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -207,101 +253,48 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun transcribeSelectedAudio() {
+    private fun startBackgroundTranscription() {
         val uri = audioUri ?: return
         val model = selectedModel()
-        val modelFile = modelManager.fileFor(model)
         if (!modelManager.isDownloaded(model)) {
             statusText.text = "Выбери или импортируй модель."
             return
         }
 
-        val language = selectedLanguage().code
-        lifecycleScope.launch {
-            setWorking(true)
-            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            transcriptionProgress.progress = 0
-            segments = emptyList()
-            resultText.text = ""
-            statusText.text = "Загружаю ${model.title} в память…"
-
-            var engineToClose: WhisperEngine? = null
-            try {
-                val engine = withContext(Dispatchers.Default) { WhisperEngine(modelFile) }
-                engineToClose = engine
-                val collected = mutableListOf<WhisperSegment>()
-
-                AudioChunkDecoder.decode(this@MainActivity, uri) { samples, offsetMs, totalDurationMs ->
-                    val chunkDurationMs = samples.size * 1_000L / AudioChunkDecoder.TARGET_SAMPLE_RATE
-                    var lastOverallProgress = -1
-
-                    withContext(Dispatchers.Main) {
-                        statusText.text = "Распознаю с ${formatClock(offsetMs)}…"
-                    }
-
-                    val chunkSegments = engine.transcribe(samples, language, offsetMs) { chunkProgress ->
-                        if (totalDurationMs > 0) {
-                            val processedMs = offsetMs + (chunkDurationMs * chunkProgress / 100L)
-                            val overallProgress = ((processedMs * 100L) / totalDurationMs)
-                                .toInt()
-                                .coerceIn(0, 99)
-
-                            if (overallProgress != lastOverallProgress) {
-                                lastOverallProgress = overallProgress
-                                runOnUiThread {
-                                    transcriptionProgress.progress = overallProgress
-                                    statusText.text = "Распознаю ${formatClock(processedMs)} / ${formatClock(totalDurationMs)} · $overallProgress%"
-                                }
-                            }
-                        } else {
-                            runOnUiThread {
-                                statusText.text = "Распознаю текущий фрагмент · $chunkProgress%"
-                            }
-                        }
-                    }
-                    collected += chunkSegments
-
-                    withContext(Dispatchers.Main) {
-                        segments = collected.toList()
-                        resultText.text = segments.joinToString("\n\n") { it.text }
-
-                        val processedMs = offsetMs + chunkDurationMs
-                        transcriptionProgress.progress = if (totalDurationMs > 0) {
-                            ((processedMs * 100L) / totalDurationMs).toInt().coerceIn(0, 99)
-                        } else {
-                            transcriptionProgress.progress
-                        }
-                    }
-                }
-
-                transcriptionProgress.progress = 100
-                statusText.text = "Готово. ${segments.size} фрагментов."
-            } catch (t: Throwable) {
-                statusText.text = "Ошибка распознавания: ${t.message ?: t.javaClass.simpleName}"
-            } finally {
-                withContext(Dispatchers.Default) { engineToClose?.close() }
-                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                setWorking(false)
-            }
+        val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
+            putExtra(TranscriptionService.EXTRA_AUDIO_URI, uri.toString())
+            putExtra(TranscriptionService.EXTRA_AUDIO_NAME, audioDisplayName)
+            putExtra(TranscriptionService.EXTRA_MODEL, model.name)
+            putExtra(TranscriptionService.EXTRA_LANGUAGE, selectedLanguage().code)
         }
+
+        isTranscribing = true
+        segments = emptyList()
+        resultText.text = ""
+        transcriptionProgress.progress = 0
+        statusText.text = "Запускаю фоновое распознавание…"
+        updateControls()
+
+        ContextCompat.startForegroundService(this, serviceIntent)
     }
 
     private fun setWorking(working: Boolean) {
         isWorking = working
-        modelSpinner.isEnabled = !working
-        languageSpinner.isEnabled = !working
-        pickAudioButton.isEnabled = !working
-        importModelButton.isEnabled = !working
         updateControls()
     }
 
     private fun updateControls() {
+        val busy = isWorking || isTranscribing
         val modelReady = modelManager.isDownloaded(selectedModel())
-        downloadModelButton.isEnabled = !isWorking && !modelReady
-        importModelButton.isEnabled = !isWorking
-        transcribeButton.isEnabled = !isWorking && modelReady && audioUri != null
-        exportTxtButton.isEnabled = !isWorking && segments.isNotEmpty()
-        exportSrtButton.isEnabled = !isWorking && segments.isNotEmpty()
+
+        modelSpinner.isEnabled = !busy
+        languageSpinner.isEnabled = !busy
+        pickAudioButton.isEnabled = !busy
+        importModelButton.isEnabled = !busy
+        downloadModelButton.isEnabled = !busy && !modelReady
+        transcribeButton.isEnabled = !busy && modelReady && audioUri != null
+        exportTxtButton.isEnabled = !busy && segments.isNotEmpty()
+        exportSrtButton.isEnabled = !busy && segments.isNotEmpty()
     }
 
     private fun updateModelUi() {
@@ -379,13 +372,6 @@ class MainActivity : AppCompatActivity() {
         val seconds = (safe / 1_000L) % 60L
         val millis = safe % 1_000L
         return String.format(Locale.US, "%02d:%02d:%02d,%03d", hours, minutes, seconds, millis)
-    }
-
-    private fun formatClock(ms: Long): String {
-        val safe = ms.coerceAtLeast(0L)
-        val minutes = safe / 60_000L
-        val seconds = (safe / 1_000L) % 60L
-        return String.format(Locale.US, "%d:%02d", minutes, seconds)
     }
 
     private fun humanBytes(bytes: Long): String {
