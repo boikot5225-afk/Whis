@@ -15,16 +15,11 @@ import java.nio.ByteOrder
 
 object AudioChunkDecoder {
     const val TARGET_SAMPLE_RATE = 16_000
-    // Short chunks make it obvious very quickly whether whisper.cpp is actually progressing.
-    // Medium on a phone can spend a long time inside one whisper_full() call for 60 seconds.
-    private const val CHUNK_SECONDS = 15
+    // Whisper's natural analysis window is 30 seconds. Using 15-second chunks causes
+    // extra encoder passes without buying much latency once live progress callbacks work.
+    private const val CHUNK_SECONDS = 30
     private const val TIMEOUT_US = 10_000L
 
-    /**
-     * Decodes Android-supported audio (MP3/M4A/AAC/OGG/FLAC/WAV depending on device),
-     * downmixes it to mono and resamples to Whisper's 16 kHz input. Audio is delivered
-     * in fifteen-second chunks so the UI can advance frequently even with a heavy model.
-     */
     suspend fun decode(
         context: Context,
         uri: Uri,
@@ -85,13 +80,7 @@ object AudioChunkDecoder {
                         inputBuffer.clear()
                         val sampleSize = extractor.readSampleData(inputBuffer, 0)
                         if (sampleSize < 0) {
-                            codec.queueInputBuffer(
-                                inputIndex,
-                                0,
-                                0,
-                                0L,
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                            )
+                            codec.queueInputBuffer(inputIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             inputDone = true
                         } else {
                             codec.queueInputBuffer(
@@ -129,12 +118,7 @@ object AudioChunkDecoder {
                                 limit(info.offset + info.size)
                             }.slice().order(ByteOrder.LITTLE_ENDIAN)
 
-                            consumePcm(
-                                view,
-                                outputChannels,
-                                pcmEncoding,
-                                resampler,
-                            ) { sample ->
+                            consumePcm(view, outputChannels, pcmEncoding, resampler) { sample ->
                                 collector.add(sample)?.let(completedChunks::add)
                             }
                         }
@@ -179,9 +163,7 @@ object AudioChunkDecoder {
                 val frameBytes = channels * 2
                 while (buffer.remaining() >= frameBytes) {
                     var mono = 0f
-                    repeat(channels) {
-                        mono += buffer.short / 32768f
-                    }
+                    repeat(channels) { mono += buffer.short / 32768f }
                     resampler.consume(mono / channels, emit)
                 }
             }
@@ -190,9 +172,7 @@ object AudioChunkDecoder {
                 val frameBytes = channels * 4
                 while (buffer.remaining() >= frameBytes) {
                     var mono = 0f
-                    repeat(channels) {
-                        mono += buffer.float.coerceIn(-1f, 1f)
-                    }
+                    repeat(channels) { mono += buffer.float.coerceIn(-1f, 1f) }
                     resampler.consume(mono / channels, emit)
                 }
             }
@@ -208,7 +188,6 @@ object AudioChunkDecoder {
         fun add(value: Float): FloatArray? {
             data[size++] = value
             if (size < capacity) return null
-
             val completed = data
             data = FloatArray(capacity)
             size = 0
@@ -221,7 +200,6 @@ object AudioChunkDecoder {
         }
     }
 
-    /** Stateful linear resampler that survives MediaCodec output-buffer boundaries. */
     private class LinearResampler(sourceRate: Int) {
         private val step = sourceRate.toDouble() / TARGET_SAMPLE_RATE.toDouble()
         private var previous = 0f
@@ -237,8 +215,7 @@ object AudioChunkDecoder {
                 nextOutputPosition = 0.0
             }
 
-            val currentIndex = sourceIndex
-            if (currentIndex == 0L && nextOutputPosition == 0.0) {
+            if (sourceIndex == 0L && nextOutputPosition == 0.0) {
                 emit(sample)
                 nextOutputPosition += step
                 previous = sample
