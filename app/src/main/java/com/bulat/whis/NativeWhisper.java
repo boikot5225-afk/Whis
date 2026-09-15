@@ -7,6 +7,10 @@ public final class NativeWhisper {
 
     private NativeWhisper() {}
 
+    public interface ProgressCallback {
+        void onProgress(int progress);
+    }
+
     public static native long initContext(String modelPath);
     public static native void freeContext(long contextPtr);
     public static native int fullTranscribe(
@@ -14,7 +18,8 @@ public final class NativeWhisper {
             int numThreads,
             float[] audioData,
             String language,
-            boolean translate
+            boolean translate,
+            ProgressCallback progressCallback
     );
     public static native int getSegmentCount(long contextPtr);
     public static native String getSegmentText(long contextPtr, int index);
