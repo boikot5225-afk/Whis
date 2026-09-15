@@ -1,0 +1,12 @@
+.gradle/
+.idea/
+local.properties
+*.iml
+.DS_Store
+/build/
+**/build/
+.cxx/
+.externalNativeBuild/
+vendor/whisper.cpp/
+*.apk
+*.aab

@@ -1,0 +1,338 @@
+package com.bulat.whis
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.provider.OpenableColumns
+import android.view.View
+import android.view.WindowManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.ProgressBar
+import android.widget.Spinner
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Locale
+
+class MainActivity : AppCompatActivity() {
+    private lateinit var modelManager: ModelManager
+
+    private lateinit var modelSpinner: Spinner
+    private lateinit var languageSpinner: Spinner
+    private lateinit var downloadModelButton: Button
+    private lateinit var modelDownloadProgress: ProgressBar
+    private lateinit var modelStatus: TextView
+    private lateinit var pickAudioButton: Button
+    private lateinit var audioName: TextView
+    private lateinit var transcribeButton: Button
+    private lateinit var transcriptionProgress: ProgressBar
+    private lateinit var statusText: TextView
+    private lateinit var resultText: TextView
+    private lateinit var exportTxtButton: Button
+    private lateinit var exportSrtButton: Button
+
+    private var audioUri: Uri? = null
+    private var audioDisplayName: String = "podcast"
+    private var isWorking = false
+    private var segments: List<WhisperSegment> = emptyList()
+    private var pendingExport: String = ""
+
+    private val languages = listOf(
+        LanguageOption("Автоопределение", "auto"),
+        LanguageOption("Русский", "ru"),
+        LanguageOption("English", "en"),
+        LanguageOption("中文", "zh"),
+        LanguageOption("Français", "fr"),
+        LanguageOption("Español", "es"),
+        LanguageOption("日本語", "ja"),
+        LanguageOption("Deutsch", "de"),
+    )
+
+    private val openAudio = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            audioUri = uri
+            runCatching {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            audioDisplayName = queryDisplayName(uri) ?: "audio"
+            audioName.text = audioDisplayName
+            statusText.text = "Аудио выбрано."
+            updateControls()
+        }
+    }
+
+    private val saveTxt = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        writeExport(uri)
+    }
+
+    private val saveSrt = registerForActivityResult(ActivityResultContracts.CreateDocument("application/x-subrip")) { uri ->
+        writeExport(uri)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        modelManager = ModelManager(this)
+        bindViews()
+        setupSpinners()
+        setupActions()
+        updateModelUi()
+        updateControls()
+    }
+
+    private fun bindViews() {
+        modelSpinner = findViewById(R.id.modelSpinner)
+        languageSpinner = findViewById(R.id.languageSpinner)
+        downloadModelButton = findViewById(R.id.downloadModelButton)
+        modelDownloadProgress = findViewById(R.id.modelDownloadProgress)
+        modelStatus = findViewById(R.id.modelStatus)
+        pickAudioButton = findViewById(R.id.pickAudioButton)
+        audioName = findViewById(R.id.audioName)
+        transcribeButton = findViewById(R.id.transcribeButton)
+        transcriptionProgress = findViewById(R.id.transcriptionProgress)
+        statusText = findViewById(R.id.statusText)
+        resultText = findViewById(R.id.resultText)
+        exportTxtButton = findViewById(R.id.exportTxtButton)
+        exportSrtButton = findViewById(R.id.exportSrtButton)
+    }
+
+    private fun setupSpinners() {
+        modelSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            WhisperModel.values(),
+        )
+        languageSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            languages,
+        )
+
+        modelSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                updateModelUi()
+                updateControls()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+    }
+
+    private fun setupActions() {
+        pickAudioButton.setOnClickListener {
+            openAudio.launch(arrayOf("audio/*", "video/*"))
+        }
+
+        downloadModelButton.setOnClickListener {
+            downloadSelectedModel()
+        }
+
+        transcribeButton.setOnClickListener {
+            transcribeSelectedAudio()
+        }
+
+        exportTxtButton.setOnClickListener {
+            pendingExport = segments.joinToString("\n") { it.text }
+            saveTxt.launch(baseExportName() + ".txt")
+        }
+
+        exportSrtButton.setOnClickListener {
+            pendingExport = buildSrt(segments)
+            saveSrt.launch(baseExportName() + ".srt")
+        }
+    }
+
+    private fun downloadSelectedModel() {
+        val model = selectedModel()
+        if (modelManager.isDownloaded(model)) {
+            updateModelUi()
+            return
+        }
+
+        lifecycleScope.launch {
+            setWorking(true)
+            modelDownloadProgress.visibility = View.VISIBLE
+            modelDownloadProgress.progress = 0
+            statusText.text = "Скачиваю ${model.title}…"
+
+            try {
+                val file = modelManager.download(model) { percent ->
+                    modelDownloadProgress.progress = percent
+                    statusText.text = "Скачиваю модель: $percent%"
+                }
+                modelDownloadProgress.progress = 100
+                statusText.text = "Модель готова: ${humanBytes(file.length())}. Дальше всё работает локально."
+            } catch (t: Throwable) {
+                statusText.text = "Не удалось скачать модель: ${t.message ?: t.javaClass.simpleName}"
+            } finally {
+                setWorking(false)
+                updateModelUi()
+            }
+        }
+    }
+
+    private fun transcribeSelectedAudio() {
+        val uri = audioUri ?: return
+        val model = selectedModel()
+        val modelFile = modelManager.fileFor(model)
+        if (!modelManager.isDownloaded(model)) {
+            statusText.text = "Сначала скачай выбранную модель."
+            return
+        }
+
+        val language = selectedLanguage().code
+        lifecycleScope.launch {
+            setWorking(true)
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            transcriptionProgress.progress = 0
+            segments = emptyList()
+            resultText.text = ""
+            statusText.text = "Загружаю модель в память…"
+
+            var engineToClose: WhisperEngine? = null
+            try {
+                val engine = withContext(Dispatchers.Default) { WhisperEngine(modelFile) }
+                engineToClose = engine
+                val collected = mutableListOf<WhisperSegment>()
+
+                AudioChunkDecoder.decode(this@MainActivity, uri) { samples, offsetMs, totalDurationMs ->
+                    withContext(Dispatchers.Main) {
+                        statusText.text = "Распознаю с ${formatClock(offsetMs)}…"
+                    }
+
+                    val chunkSegments = engine.transcribe(samples, language, offsetMs)
+                    collected += chunkSegments
+
+                    withContext(Dispatchers.Main) {
+                        segments = collected.toList()
+                        resultText.text = segments.joinToString("\n\n") { it.text }
+
+                        val processedMs = offsetMs + samples.size * 1_000L / AudioChunkDecoder.TARGET_SAMPLE_RATE
+                        transcriptionProgress.progress = if (totalDurationMs > 0) {
+                            ((processedMs * 100L) / totalDurationMs).toInt().coerceIn(0, 99)
+                        } else {
+                            0
+                        }
+                    }
+                }
+
+                transcriptionProgress.progress = 100
+                statusText.text = "Готово. ${segments.size} фрагментов."
+            } catch (t: Throwable) {
+                statusText.text = "Ошибка распознавания: ${t.message ?: t.javaClass.simpleName}"
+            } finally {
+                withContext(Dispatchers.Default) { engineToClose?.close() }
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                setWorking(false)
+            }
+        }
+    }
+
+    private fun setWorking(working: Boolean) {
+        isWorking = working
+        modelSpinner.isEnabled = !working
+        languageSpinner.isEnabled = !working
+        pickAudioButton.isEnabled = !working
+        updateControls()
+    }
+
+    private fun updateControls() {
+        val modelReady = modelManager.isDownloaded(selectedModel())
+        downloadModelButton.isEnabled = !isWorking && !modelReady
+        transcribeButton.isEnabled = !isWorking && modelReady && audioUri != null
+        exportTxtButton.isEnabled = !isWorking && segments.isNotEmpty()
+        exportSrtButton.isEnabled = !isWorking && segments.isNotEmpty()
+    }
+
+    private fun updateModelUi() {
+        val model = selectedModel()
+        val file = modelManager.fileFor(model)
+        if (modelManager.isDownloaded(model)) {
+            modelStatus.text = "На телефоне · ${humanBytes(file.length())}"
+            downloadModelButton.text = "Модель скачана"
+        } else {
+            modelStatus.text = "Нужно скачать один раз. Потом интернет не нужен."
+            downloadModelButton.text = "Скачать модель"
+        }
+    }
+
+    private fun selectedModel(): WhisperModel {
+        return (modelSpinner.selectedItem as? WhisperModel) ?: WhisperModel.SMALL_Q5_1
+    }
+
+    private fun selectedLanguage(): LanguageOption {
+        return (languageSpinner.selectedItem as? LanguageOption) ?: languages.first()
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
+    private fun writeExport(uri: Uri?) {
+        if (uri == null || pendingExport.isEmpty()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { writer ->
+                    writer.write(pendingExport)
+                } ?: error("Не удалось открыть файл для записи")
+            }.onSuccess {
+                withContext(Dispatchers.Main) { statusText.text = "Файл сохранён." }
+            }.onFailure { error ->
+                withContext(Dispatchers.Main) { statusText.text = "Не удалось сохранить: ${error.message}" }
+            }
+        }
+    }
+
+    private fun buildSrt(items: List<WhisperSegment>): String = buildString {
+        items.forEachIndexed { index, segment ->
+            append(index + 1).append('\n')
+            append(formatSrtTime(segment.startMs))
+                .append(" --> ")
+                .append(formatSrtTime(segment.endMs))
+                .append('\n')
+            append(segment.text).append("\n\n")
+        }
+    }
+
+    private fun formatSrtTime(ms: Long): String {
+        val safe = ms.coerceAtLeast(0L)
+        val hours = safe / 3_600_000L
+        val minutes = (safe / 60_000L) % 60L
+        val seconds = (safe / 1_000L) % 60L
+        val millis = safe % 1_000L
+        return String.format(Locale.US, "%02d:%02d:%02d,%03d", hours, minutes, seconds, millis)
+    }
+
+    private fun formatClock(ms: Long): String {
+        val safe = ms.coerceAtLeast(0L)
+        val minutes = safe / 60_000L
+        val seconds = (safe / 1_000L) % 60L
+        return String.format(Locale.US, "%d:%02d", minutes, seconds)
+    }
+
+    private fun humanBytes(bytes: Long): String {
+        val mib = bytes / (1024.0 * 1024.0)
+        return if (mib >= 1024.0) {
+            String.format(Locale.US, "%.2f ГБ", mib / 1024.0)
+        } else {
+            String.format(Locale.US, "%.0f МБ", mib)
+        }
+    }
+
+    private fun baseExportName(): String {
+        return audioDisplayName.substringBeforeLast('.', audioDisplayName).ifBlank { "transcript" }
+    }
+
+    private data class LanguageOption(val title: String, val code: String) {
+        override fun toString(): String = title
+    }
+}
