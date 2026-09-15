@@ -32,6 +32,11 @@ jobs:
             "ndk;25.2.9519653" \
             "cmake;3.22.1"
 
+      - name: Prepare stable debug signing key
+        run: |
+          mkdir -p .ci
+          base64 -d .ci/whis-ci-debug.keystore.b64 > .ci/whis-ci-debug.keystore
+
       - name: Fetch whisper.cpp
         run: bash scripts/fetch-whisper.sh
 
