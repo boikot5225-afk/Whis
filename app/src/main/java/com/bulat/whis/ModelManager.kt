@@ -1,6 +1,7 @@
 package com.bulat.whis
 
 import android.content.Context
+import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -11,9 +12,9 @@ enum class WhisperModel(
     val id: String,
     val title: String,
 ) {
-    SMALL_Q5_1("small-q5_1", "Small Q5_1 — быстро"),
-    MEDIUM_Q5_0("medium-q5_0", "Medium Q5_0 — точнее"),
-    LARGE_V3_TURBO_Q5_0("large-v3-turbo-q5_0", "Large v3 Turbo Q5_0 — максимум"),
+    SMALL_Q5_1("small-q5_1", "Small — быстро"),
+    MEDIUM_Q5_0("medium-q5_0", "Medium — точнее"),
+    LARGE_V3_TURBO_Q5_0("large-v3-turbo-q5_0", "Large v3 Turbo — максимум"),
     ;
 
     val fileName: String
@@ -33,6 +34,28 @@ class ModelManager(private val context: Context) {
     fun isDownloaded(model: WhisperModel): Boolean {
         val file = fileFor(model)
         return file.isFile && file.length() > 1_000_000L
+    }
+
+    suspend fun importModel(uri: Uri, model: WhisperModel): File = withContext(Dispatchers.IO) {
+        val target = fileFor(model)
+        val partial = File(modelsDir, "${model.fileName}.import")
+        partial.delete()
+
+        try {
+            context.contentResolver.openInputStream(uri)?.buffered()?.use { input ->
+                partial.outputStream().buffered().use { output ->
+                    input.copyTo(output, DEFAULT_BUFFER_SIZE * 8)
+                }
+            } ?: error("Не удалось открыть выбранный файл модели")
+
+            check(partial.length() > 1_000_000L) { "Файл модели подозрительно маленький" }
+            if (target.exists()) target.delete()
+            check(partial.renameTo(target)) { "Не удалось сохранить импортированную модель" }
+            target
+        } catch (t: Throwable) {
+            partial.delete()
+            throw t
+        }
     }
 
     suspend fun download(
