@@ -26,4 +26,6 @@ public final class NativeWhisper {
     public static native long getSegmentT0(long contextPtr, int index);
     public static native long getSegmentT1(long contextPtr, int index);
     public static native String getSystemInfo();
+    public static native String getTimings(long contextPtr);
+    public static native String getModelInfo(long contextPtr);
 }
