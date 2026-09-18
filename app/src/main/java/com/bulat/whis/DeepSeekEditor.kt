@@ -38,7 +38,7 @@ object DeepSeekEditor {
             readTimeout = 180_000
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("Authorization", "Bearer \$apiKey")
+            setRequestProperty("Authorization", "Bearer $apiKey")
         }
 
         val systemPrompt = """
@@ -52,6 +52,7 @@ object DeepSeekEditor {
         val body = JSONObject()
             .put("model", MODEL)
             .put("stream", false)
+            .put("thinking", JSONObject().put("type", "disabled"))
             .put("max_tokens", 8192)
             .put(
                 "messages",
@@ -81,9 +82,9 @@ object DeepSeekEditor {
                 }.getOrDefault("")
                 error(
                     if (apiMessage.isNotBlank()) {
-                        "DeepSeek HTTP \$code: \$apiMessage"
+                        "DeepSeek HTTP $code: $apiMessage"
                     } else {
-                        "DeepSeek HTTP \$code"
+                        "DeepSeek HTTP $code"
                     },
                 )
             }
