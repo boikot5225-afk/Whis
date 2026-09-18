@@ -49,14 +49,14 @@ object EpubExporter {
 """
 
     private fun packageOpf(title: String, language: String): String {
-        val identifier = "urn:uuid:\${UUID.randomUUID()}"
+        val identifier = "urn:uuid:${UUID.randomUUID()}"
         return """<?xml version="1.0" encoding="UTF-8"?>
 <package version="3.0" unique-identifier="book-id"
     xmlns="http://www.idpf.org/2007/opf">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="book-id">\${escapeXml(identifier)}</dc:identifier>
-    <dc:title>\${escapeXml(title)}</dc:title>
-    <dc:language>\${escapeXml(language.ifBlank { "und" })}</dc:language>
+    <dc:identifier id="book-id">${escapeXml(identifier)}</dc:identifier>
+    <dc:title>${escapeXml(title)}</dc:title>
+    <dc:language>${escapeXml(language.ifBlank { "und" })}</dc:language>
     <meta property="dcterms:modified">2026-09-18T00:00:00Z</meta>
   </metadata>
   <manifest>
@@ -90,15 +90,15 @@ object EpubExporter {
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .joinToString("\n") { paragraph ->
-                "<p>\${escapeXml(paragraph).replace("\n", "<br/>")}</p>"
+                "<p>${escapeXml(paragraph).replace("\n", "<br/>")}</p>"
             }
 
         return """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="\${escapeXml(language.ifBlank { "und" })}">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="${escapeXml(language.ifBlank { "und" })}">
 <head>
   <meta charset="utf-8"/>
-  <title>\${escapeXml(title)}</title>
+  <title>${escapeXml(title)}</title>
   <style>
     body { font-family: sans-serif; line-height: 1.55; margin: 5%; }
     h1 { font-size: 1.4em; }
@@ -106,8 +106,8 @@ object EpubExporter {
   </style>
 </head>
 <body>
-<h1>\${escapeXml(title)}</h1>
-\$paragraphs
+<h1>${escapeXml(title)}</h1>
+$paragraphs
 </body>
 </html>
 """
