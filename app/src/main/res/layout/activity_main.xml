@@ -22,7 +22,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Локальный Whisper для подкастов. Аудио никуда не отправляется."
+            android:text="Распознавание Whisper идёт локально. Текст отправляется в DeepSeek только если ты сам запускаешь редактуру."
             android:textAppearance="@style/TextAppearance.MaterialComponents.Body1" />
 
         <TextView
@@ -123,6 +123,38 @@
             android:text="Готов к работе"
             android:textAppearance="@style/TextAppearance.MaterialComponents.Body2" />
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="Редактура DeepSeek"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/deepSeekApiKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="DeepSeek API key"
+            android:inputType="textPassword"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Ключ не сохраняется. При нажатии ниже в DeepSeek отправляется только текст расшифровки."
+            android:textAppearance="@style/TextAppearance.MaterialComponents.Caption" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/deepSeekEditButton"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:enabled="false"
+            android:text="Исправить текст через DeepSeek" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -146,6 +178,15 @@
                 android:layout_weight="1"
                 android:enabled="false"
                 android:text="SRT" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/exportEpubButton"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:text="EPUB" />
         </LinearLayout>
 
         <TextView
