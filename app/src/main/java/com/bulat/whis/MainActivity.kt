@@ -11,6 +11,7 @@ import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.Spinner
 import android.widget.TextView
@@ -40,14 +41,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var transcriptionProgress: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var resultText: TextView
+    private lateinit var deepSeekApiKey: EditText
+    private lateinit var deepSeekEditButton: Button
     private lateinit var exportTxtButton: Button
     private lateinit var exportSrtButton: Button
+    private lateinit var exportEpubButton: Button
 
     private var audioUri: Uri? = null
     private var audioDisplayName: String = "podcast"
     private var isWorking = false
     private var isTranscribing = false
     private var segments: List<WhisperSegment> = emptyList()
+    private var editedText: String? = null
     private var pendingExport: String = ""
 
     private val languages = listOf(
@@ -105,6 +110,10 @@ class MainActivity : AppCompatActivity() {
         writeExport(uri)
     }
 
+    private val saveEpub = registerForActivityResult(ActivityResultContracts.CreateDocument("application/epub+zip")) { uri ->
+        writeEpub(uri)
+    }
+
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -134,8 +143,11 @@ class MainActivity : AppCompatActivity() {
         transcriptionProgress = findViewById(R.id.transcriptionProgress)
         statusText = findViewById(R.id.statusText)
         resultText = findViewById(R.id.resultText)
+        deepSeekApiKey = findViewById(R.id.deepSeekApiKey)
+        deepSeekEditButton = findViewById(R.id.deepSeekEditButton)
         exportTxtButton = findViewById(R.id.exportTxtButton)
         exportSrtButton = findViewById(R.id.exportSrtButton)
+        exportEpubButton = findViewById(R.id.exportEpubButton)
     }
 
     private fun setupSpinners() {
@@ -177,14 +189,22 @@ class MainActivity : AppCompatActivity() {
             startBackgroundTranscription()
         }
 
+        deepSeekEditButton.setOnClickListener {
+            editWithDeepSeek()
+        }
+
         exportTxtButton.setOnClickListener {
-            pendingExport = segments.joinToString("\n") { it.text }
+            pendingExport = currentTranscriptText()
             saveTxt.launch(baseExportName() + ".txt")
         }
 
         exportSrtButton.setOnClickListener {
             pendingExport = buildSrt(segments)
             saveSrt.launch(baseExportName() + ".srt")
+        }
+
+        exportEpubButton.setOnClickListener {
+            saveEpub.launch(baseExportName() + ".epub")
         }
     }
 
@@ -204,7 +224,12 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     segments = state.segments
-                    if (segments.isNotEmpty()) {
+                    if (state.running) {
+                        editedText = null
+                    }
+                    if (editedText != null && !state.running) {
+                        resultText.text = editedText
+                    } else if (segments.isNotEmpty()) {
                         resultText.text = segments.joinToString("\n\n") { it.text }
                     } else if (state.running) {
                         resultText.text = ""
@@ -270,6 +295,7 @@ class MainActivity : AppCompatActivity() {
 
         isTranscribing = true
         segments = emptyList()
+        editedText = null
         resultText.text = ""
         transcriptionProgress.progress = 0
         statusText.text = "Запускаю фоновое распознавание…"
@@ -291,10 +317,13 @@ class MainActivity : AppCompatActivity() {
         languageSpinner.isEnabled = !busy
         pickAudioButton.isEnabled = !busy
         importModelButton.isEnabled = !busy
+        deepSeekApiKey.isEnabled = !busy
         downloadModelButton.isEnabled = !busy && !modelReady
         transcribeButton.isEnabled = !busy && modelReady && audioUri != null
-        exportTxtButton.isEnabled = !busy && segments.isNotEmpty()
+        deepSeekEditButton.isEnabled = !busy && segments.isNotEmpty()
+        exportTxtButton.isEnabled = !busy && currentTranscriptText().isNotBlank()
         exportSrtButton.isEnabled = !busy && segments.isNotEmpty()
+        exportEpubButton.isEnabled = !busy && currentTranscriptText().isNotBlank()
     }
 
     private fun updateModelUi() {
@@ -336,6 +365,67 @@ class MainActivity : AppCompatActivity() {
     private fun queryDisplayName(uri: Uri): String? {
         return contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
+    private fun editWithDeepSeek() {
+        val apiKey = deepSeekApiKey.text?.toString()?.trim().orEmpty()
+        if (apiKey.isBlank()) {
+            statusText.text = "Вставь DeepSeek API key."
+            return
+        }
+
+        val source = currentTranscriptText()
+        if (source.isBlank()) {
+            statusText.text = "Сначала нужна расшифровка."
+            return
+        }
+
+        lifecycleScope.launch {
+            setWorking(true)
+            statusText.text = "DeepSeek: готовлю редактуру…"
+            try {
+                val edited = DeepSeekEditor.editTranscript(apiKey, source) { current, total ->
+                    runOnUiThread {
+                        statusText.text = "DeepSeek: редактирую часть $current из $total…"
+                    }
+                }
+                editedText = edited
+                resultText.text = edited
+                statusText.text = "DeepSeek: готово. TXT и EPUB будут экспортировать отредактированный текст; SRT оставлен с исходными таймкодами."
+            } catch (t: Throwable) {
+                statusText.text = "Ошибка DeepSeek: ${t.message ?: t.javaClass.simpleName}"
+            } finally {
+                setWorking(false)
+            }
+        }
+    }
+
+    private fun currentTranscriptText(): String {
+        return editedText?.takeIf { it.isNotBlank() }
+            ?: segments.joinToString("\n\n") { it.text }
+    }
+
+    private fun writeEpub(uri: Uri?) {
+        if (uri == null) return
+        val text = currentTranscriptText()
+        if (text.isBlank()) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                contentResolver.openOutputStream(uri, "w")?.use { output ->
+                    EpubExporter.write(
+                        output = output,
+                        title = baseExportName(),
+                        language = selectedLanguage().code.takeUnless { it == "auto" } ?: "und",
+                        text = text,
+                    )
+                } ?: error("Не удалось открыть EPUB для записи")
+            }.onSuccess {
+                withContext(Dispatchers.Main) { statusText.text = "EPUB сохранён." }
+            }.onFailure { error ->
+                withContext(Dispatchers.Main) { statusText.text = "Не удалось сохранить EPUB: ${error.message}" }
+            }
         }
     }
 
